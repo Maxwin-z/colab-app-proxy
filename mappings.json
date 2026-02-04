@@ -1,0 +1,12 @@
+[
+  {
+    "path": "/ollama",
+    "port": 11434,
+    "name": "ollama"
+  },
+  {
+    "path": "/colab-ollama-app",
+    "port": 11434,
+    "name": "Colab Ollama App"
+  }
+]
