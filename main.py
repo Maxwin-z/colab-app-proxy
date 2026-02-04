@@ -111,6 +111,7 @@ def _load_apps():
                 a["pgid"] = None
                 a["ports"] = []
                 a["error"] = None
+                a["git_hash"] = _get_git_hash(APPS_DIR / a["id"])
                 _apps.append(a)
         except Exception:
             _apps = []
@@ -148,6 +149,20 @@ def _app_log_line(app_id: str, line: str):
     log = _get_app_log(app_id)
     ts = datetime.now().strftime("%H:%M:%S")
     log.append(f"[{ts}] {line}")
+
+
+def _get_git_hash(app_dir: Path) -> str | None:
+    """Read the short git commit hash from an app directory (sync, no subprocess)."""
+    try:
+        head = (app_dir / ".git" / "HEAD").read_text().strip()
+        if head.startswith("ref: "):
+            ref_path = app_dir / ".git" / head[5:]
+            commit = ref_path.read_text().strip()
+        else:
+            commit = head
+        return commit[:7]
+    except Exception:
+        return None
 
 
 def _app_path(app: dict) -> str:
@@ -471,6 +486,7 @@ async def api_list_apps():
         "ports": a.get("ports", []),
         "error": a.get("error"),
         "deployed_at": a.get("deployed_at"),
+        "git_hash": a.get("git_hash"),
         "preset": a.get("preset", False),
     } for a in merged]
 
@@ -557,8 +573,9 @@ async def _deploy_and_start(app: dict):
                 return
 
         app["deployed_at"] = datetime.now().isoformat()
+        app["git_hash"] = _get_git_hash(app_dir)
         _save_apps()
-        _app_log_line(app_id, "Deploy complete, starting app...")
+        _app_log_line(app_id, f"Deploy complete (commit: {app['git_hash']}), starting app...")
 
         await _start_app(app)
 
@@ -580,6 +597,62 @@ async def api_start_app(app_id: str):
 
     asyncio.create_task(_start_app(app))
     return {"id": app_id, "status": "starting"}
+
+
+@app.post("/_api/apps/{app_id}/update")
+async def api_update_app(app_id: str):
+    app = _find_app(app_id)
+    if not app:
+        raise HTTPException(404, "App not found")
+    if app["status"] in ("deploying", "updating"):
+        raise HTTPException(409, f"App is already {app['status']}")
+    app_dir = _app_dir(app)
+    if not app_dir.exists():
+        raise HTTPException(400, "App not deployed yet. Use deploy first.")
+
+    # Stop first if running
+    was_running = app["status"] == "running"
+    if was_running:
+        await _stop_app(app)
+
+    app["status"] = "updating"
+    app["error"] = None
+    asyncio.create_task(_update_app(app, restart=was_running))
+    return {"id": app_id, "status": "updating"}
+
+
+async def _update_app(app: dict, restart: bool = False):
+    app_dir = _app_dir(app)
+    app_id = app["id"]
+    try:
+        _app_log_line(app_id, "Pulling latest changes...")
+        proc = await asyncio.create_subprocess_exec(
+            "git", "pull",
+            cwd=str(app_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await proc.communicate()
+        for line in stdout.decode(errors="replace").splitlines():
+            _app_log_line(app_id, line)
+        if proc.returncode != 0:
+            app["status"] = "error"
+            app["error"] = "git pull failed"
+            _app_log_line(app_id, "ERROR: git pull failed")
+            return
+
+        app["git_hash"] = _get_git_hash(app_dir)
+        _save_apps()
+        _app_log_line(app_id, f"Update complete (commit: {app['git_hash']})")
+        if restart:
+            _app_log_line(app_id, "Restarting app...")
+            await _start_app(app)
+        else:
+            app["status"] = "stopped"
+    except Exception as e:
+        app["status"] = "error"
+        app["error"] = str(e)
+        _app_log_line(app_id, f"Update error: {e}")
 
 
 @app.post("/_api/apps/{app_id}/stop")
@@ -628,6 +701,20 @@ async def api_get_app_logs(app_id: str, offset: int = 0, limit: int = 200):
     total = len(lines)
     sliced = lines[offset:offset + limit]
     return {"lines": sliced, "total": total, "offset": offset}
+
+
+@app.get("/_api/apps/{app_id}/readme")
+async def api_get_app_readme(app_id: str):
+    app = _find_app(app_id)
+    app_dir = APPS_DIR / app_id
+    if not app_dir.exists():
+        raise HTTPException(404, "App not deployed")
+    # Try common README filenames
+    for name in ("README.md", "readme.md", "Readme.md", "README.MD"):
+        readme = app_dir / name
+        if readme.exists():
+            return {"content": readme.read_text(encoding="utf-8", errors="replace")}
+    raise HTTPException(404, "README.md not found")
 
 
 # --- HTTP Proxy ---

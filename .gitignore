@@ -14,3 +14,4 @@ wheels/
 # Quick Deploy
 apps/
 apps_state.json
+apps/

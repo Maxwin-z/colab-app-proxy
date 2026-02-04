@@ -394,11 +394,11 @@
         .app-status-stopped .status-dot {
             background: #475569;
         }
-        .app-status-deploying {
+        .app-status-deploying, .app-status-updating {
             background: rgba(245, 158, 11, 0.15);
             color: #F59E0B;
         }
-        .app-status-deploying .status-dot {
+        .app-status-deploying .status-dot, .app-status-updating .status-dot {
             background: #F59E0B;
             animation: pulse 1.2s ease-in-out infinite;
         }
@@ -511,7 +511,56 @@
                 transition-duration: 0.01ms !important;
             }
         }
+        /* README modal rendered markdown */
+        .readme-body {
+            font-size: 0.9rem;
+            line-height: 1.7;
+            color: var(--text);
+        }
+        .readme-body h1, .readme-body h2, .readme-body h3 {
+            margin-top: 1.2em;
+            margin-bottom: 0.5em;
+            font-weight: 600;
+        }
+        .readme-body h1 { font-size: 1.4rem; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+        .readme-body h2 { font-size: 1.15rem; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+        .readme-body h3 { font-size: 1rem; }
+        .readme-body p { margin: 0.6em 0; }
+        .readme-body code {
+            font-family: var(--font-mono);
+            font-size: 0.82em;
+            background: var(--surface-2);
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .readme-body pre {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px;
+            overflow-x: auto;
+            margin: 0.8em 0;
+        }
+        .readme-body pre code {
+            background: none;
+            padding: 0;
+        }
+        .readme-body ul, .readme-body ol { padding-left: 1.5em; margin: 0.5em 0; }
+        .readme-body li { margin: 0.25em 0; }
+        .readme-body a { color: var(--blue); text-decoration: none; }
+        .readme-body a:hover { text-decoration: underline; }
+        .readme-body blockquote {
+            border-left: 3px solid var(--border);
+            margin: 0.8em 0;
+            padding: 0.2em 1em;
+            color: var(--text-muted);
+        }
+        .readme-body img { max-width: 100%; border-radius: 6px; }
+        .readme-body table { border-collapse: collapse; width: 100%; margin: 0.8em 0; }
+        .readme-body th, .readme-body td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+        .readme-body th { background: var(--surface-2); font-weight: 600; }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
     <div class="container">
@@ -597,6 +646,21 @@
             </div>
             <div class="modal-body" id="logModalBody">
                 <pre class="log-pre" id="logContent"></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- README Modal -->
+    <div class="modal-overlay" id="readmeModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="readmeModalTitle">README</h3>
+                <button class="btn btn-ghost" onclick="closeReadmeModal()">
+                    <svg class="icon" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="readme-body" id="readmeContent"></div>
             </div>
         </div>
     </div>
@@ -925,13 +989,50 @@
             }
         }
 
-        // Close modal on Escape
+        async function openReadmeModal(id, name) {
+            document.getElementById('readmeModalTitle').textContent = `${name} - README`;
+            document.getElementById('readmeContent').innerHTML = '<p style="color:var(--text-muted)">加载中...</p>';
+            document.getElementById('readmeModal').classList.add('open');
+            try {
+                const res = await fetch(`${APPS_API}/${id}/readme`);
+                if (!res.ok) {
+                    const data = await res.json();
+                    document.getElementById('readmeContent').innerHTML = `<p style="color:var(--danger)">${escHtml(data.detail || 'README 不存在')}</p>`;
+                    return;
+                }
+                const data = await res.json();
+                document.getElementById('readmeContent').innerHTML = marked.parse(data.content);
+            } catch (e) {
+                document.getElementById('readmeContent').innerHTML = '<p style="color:var(--danger)">加载失败</p>';
+            }
+        }
+
+        function closeReadmeModal() {
+            document.getElementById('readmeModal').classList.remove('open');
+        }
+
+        // Close modals on Escape
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') closeLogModal();
+            if (e.key === 'Escape') { closeLogModal(); closeReadmeModal(); }
         });
 
+        async function updateApp(id) {
+            try {
+                const res = await fetch(`${APPS_API}/${id}/update`, { method: 'POST' });
+                if (!res.ok) {
+                    const data = await res.json();
+                    toast(data.detail || '更新失败', 'error');
+                    return;
+                }
+                toast('正在更新...', 'success');
+                await loadApps();
+            } catch (e) {
+                toast('更新失败', 'error');
+            }
+        }
+
         function statusLabel(status) {
-            const map = { running: '运行中', stopped: '已停止', deploying: '部署中', error: '错误' };
+            const map = { running: '运行中', stopped: '已停止', deploying: '部署中', updating: '更新中', error: '错误' };
             return map[status] || status;
         }
 
@@ -952,11 +1053,13 @@
                     actions += `<button class="btn btn-primary btn-sm" onclick="deployPreset('${escHtml(a.git_url)}','${escHtml(a.name)}')">部署</button>`;
                 } else if (st === 'stopped' && deployed) {
                     actions += `<button class="btn btn-primary btn-sm" onclick="startApp('${escHtml(a.id)}')">启动</button>`;
+                    actions += `<button class="btn btn-ghost btn-sm" onclick="updateApp('${escHtml(a.id)}')" title="git pull 更新代码">更新</button>`;
                     actions += `<button class="btn btn-blue btn-sm" onclick="openLogModal('${escHtml(a.id)}','${escHtml(a.name)}')">日志</button>`;
                     actions += `<button class="btn btn-danger btn-sm" onclick="deleteApp('${escHtml(a.id)}')">删除</button>`;
-                } else if (st === 'deploying') {
+                } else if (st === 'deploying' || st === 'updating') {
                     actions += `<button class="btn btn-blue btn-sm" onclick="openLogModal('${escHtml(a.id)}','${escHtml(a.name)}')">日志</button>`;
                 } else if (st === 'running') {
+                    actions += `<button class="btn btn-ghost btn-sm" onclick="updateApp('${escHtml(a.id)}')" title="停止并 git pull 更新，然后重启">更新</button>`;
                     actions += `<button class="btn btn-warn btn-sm" onclick="stopApp('${escHtml(a.id)}')">停止</button>`;
                     actions += `<button class="btn btn-blue btn-sm" onclick="openLogModal('${escHtml(a.id)}','${escHtml(a.name)}')">日志</button>`;
                 } else if (st === 'error') {
@@ -971,15 +1074,18 @@
                 // Quick-open links (only when running with ports)
                 const appPath = a.path || ('/' + a.id);
                 const hasMapping = st === 'running' && (a.ports || []).length > 0;
-                const quickLinks = hasMapping
-                    ? `<a href="${escHtml(appPath)}/" class="link-pill" target="_blank">API</a><a href="${escHtml(appPath)}/docs" class="link-pill" target="_blank">Docs</a>`
+                const readmeLink = deployed
+                    ? `<a href="javascript:void(0)" class="link-pill" onclick="openReadmeModal('${escHtml(a.id)}','${escHtml(a.name)}')">README</a>`
                     : '';
+                const quickLinks = hasMapping
+                    ? `<a href="${escHtml(appPath)}/" class="link-pill" target="_blank">API</a><a href="${escHtml(appPath)}/docs" class="link-pill" target="_blank">Docs</a>${readmeLink}`
+                    : readmeLink;
 
                 return `
                 <div class="app-card">
                     <div class="app-info">
                         <div class="app-name">${escHtml(a.name)}${hasMapping ? `<span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);margin-left:8px">${escHtml(appPath)}</span>` : ''}</div>
-                        <div class="app-url">${escHtml(a.git_url)}</div>
+                        <div class="app-url">${escHtml(a.git_url)}${a.git_hash ? `<span style="margin-left:8px;padding:1px 7px;border-radius:4px;background:var(--surface-2);color:var(--text-muted);font-size:0.7rem">${escHtml(a.git_hash)}</span>` : ''}</div>
                         <div class="app-meta">
                             <span class="app-status app-status-${st}">
                                 <span class="status-dot"></span>
