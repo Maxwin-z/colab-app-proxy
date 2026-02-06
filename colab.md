@@ -1,3 +1,4 @@
+```
 import os
 from google.colab import userdata
 
@@ -11,4 +12,4 @@ try:
     !bash ./start.sh
 except userdata.SecretNotFoundError:
     print("❌ 未在 Secrets 中找到 NGROK_TOKEN")
-
+```
