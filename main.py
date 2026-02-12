@@ -4,7 +4,7 @@ import os
 import signal
 import shutil
 import socket
-from collections import deque
+from collections import Counter, deque
 from datetime import datetime
 from pathlib import Path
 
@@ -34,6 +34,32 @@ class Colors:
     BOLD = "\033[1m"
 
 COLOR_CYCLE = [Colors.CYAN, Colors.MAGENTA, Colors.GREEN, Colors.YELLOW]
+
+# --- Proxy request log batching ---
+PROXY_LOG_BATCH_SIZE = 50
+_proxy_log_counter = 0
+_proxy_log_stats: Counter = Counter()  # key: (method, path, target, status_code)
+
+
+def _record_proxy_request(method: str, path: str, target: str, status_code: int, color: str):
+    global _proxy_log_counter
+    _proxy_log_stats[(method, path, target, status_code)] += 1
+    _proxy_log_counter += 1
+    if _proxy_log_counter >= PROXY_LOG_BATCH_SIZE:
+        _flush_proxy_log()
+
+
+def _flush_proxy_log():
+    global _proxy_log_counter
+    if not _proxy_log_stats:
+        return
+    parts = []
+    for (method, path, target, status), count in _proxy_log_stats.most_common():
+        parts.append(f"  {method} {path} -> {target} [{status}] x{count}")
+    summary = "\n".join(parts)
+    logger.info(f"Proxy summary ({_proxy_log_counter} reqs):\n{summary}")
+    _proxy_log_stats.clear()
+    _proxy_log_counter = 0
 
 # --- Dynamic Mappings Store ---
 MAPPINGS_FILE = Path(__file__).parent / "mappings.json"
@@ -738,7 +764,7 @@ async def proxy_http_request(client: httpx.AsyncClient, request: Request, target
 
         r = await client.send(req, stream=True)
 
-        logger.info(f"{color}{request.method} {request.url.path} -> {target_url} [{r.status_code}]{Colors.RESET}")
+        _record_proxy_request(request.method, request.url.path, target_url, r.status_code, color)
 
         if r.status_code == 206 or "content-length" in r.headers:
             content = await r.aread()
